@@ -12,42 +12,16 @@
 
 #define RB_FIRST_MINOR 0
 #define RB_MINOR_CNT 16
-#define LATENCY 0
+
 
 int latency = 0;
 long bw = 0;
 
-long transfered = 0;
-long timestarted = 0;
 long sec = 1000000;
 
 module_param(latency, int, 0);
-module_param(bw, int, 0);
+module_param(bw, long, 0);
 
-
-static void bandwidth_timeout(int bv_len)
-{
-//        printk(KERN_DEBUG "timeout\n");
-        struct timeval tv;
-        do_gettimeofday(&tv);
-        long curr_time = sec * tv.tv_sec + tv.tv_usec;
-        if (timestarted == 0)
-            timestarted = sec * tv.tv_sec + tv.tv_usec;
-	transfered += bv_len;
-//        printk(KERN_DEBUG "started\n %d", timestarted);
-	if (transfered > bw)
-	{
-		if ((curr_time - timestarted) < sec) {
-                        printk(KERN_INFO "delay %d", (sec - (curr_time - timestarted)) );
-			ndelay(sec - (curr_time - timestarted));
-			do_gettimeofday(&tv);
-			timestarted = sec * tv.tv_sec + tv.tv_usec;
-		}
-                do_gettimeofday(&tv);
-                timestarted = sec * tv.tv_sec + tv.tv_usec;
-                transfered = 0;
-	}
-}
 
 static u_int rb_major = 0;
 
@@ -89,13 +63,11 @@ static int rb_close(struct gendisk *disk, fmode_t mode)
  */
 static int rb_transfer(struct request *req)
 {
-	//struct rb_device *dev = (struct rb_device *)(req->rq_disk->private_data);
-        udelay(latency);
 	int dir = rq_data_dir(req);
 	sector_t start_sector = blk_rq_pos(req);
 	unsigned int sector_cnt = blk_rq_sectors(req);
 
-	struct bio_vec bv;
+	struct bio_vec *bv;
 	struct req_iterator iter;
 
 	sector_t sector_offset;
@@ -104,24 +76,31 @@ static int rb_transfer(struct request *req)
 
 	int ret = 0;
 
+	long end_time;
+	long timedelta;
+	long start_time = 0;
+	long wait_for = 0;
+	struct timeval tv;
+
 	printk(KERN_DEBUG "rb: Dir:%d; Sec:%lld; Cnt:%d\n", dir, start_sector, sector_cnt);
-        printk(KERN_DEBUG "SIze: %d", RB_SECTOR_SIZE);
 	sector_offset = 0;
 	rq_for_each_segment(bv, req, iter)
 	{
-                bandwidth_timeout(bv.bv_len);
-		buffer = page_address(bv.bv_page) + bv.bv_offset;
-		if (bv.bv_len % RB_SECTOR_SIZE != 0)
-		{
-			printk(KERN_ERR "rb: Should never happen: "
-				"bio size (%d) is not a multiple of RB_SECTOR_SIZE (%d).\n"
-				"This may lead to data truncation.\n",
-				bv.bv_len, RB_SECTOR_SIZE);
+		do_gettimeofday(&tv);
+		start_time = sec * tv.tv_sec + tv.tv_usec;
+		buffer = page_address(bv->bv_page) + bv->bv_offset;
+		if (bv->bv_len % RB_SECTOR_SIZE != 0) {
+			printk(KERN_ERR
+			"rb: Should never happen: "
+					"bio size (%d) is not a multiple of RB_SECTOR_SIZE (%d).\n"
+					"This may lead to data truncation.\n",
+					bv->bv_len, RB_SECTOR_SIZE);
 			ret = -EIO;
 		}
-		sectors = bv.bv_len / RB_SECTOR_SIZE;
-		printk(KERN_DEBUG "rb: Sector Offset: %lld; Buffer: %p; Length: %d sectors\n",
-			sector_offset, buffer, sectors);
+		sectors = bv->bv_len / RB_SECTOR_SIZE;
+		printk(KERN_DEBUG
+		"rb: Sector Offset: %lld; Buffer: %p; Length: %d sectors\n",
+				sector_offset, buffer, sectors);
 		if (dir == WRITE) /* Write to the device */
 		{
 			ramdevice_write(start_sector + sector_offset, buffer, sectors);
@@ -131,13 +110,28 @@ static int rb_transfer(struct request *req)
 			ramdevice_read(start_sector + sector_offset, buffer, sectors);
 		}
 		sector_offset += sectors;
+		do_gettimeofday(&tv);
+		end_time = tv.tv_sec * sec + tv.tv_usec;
+		timedelta = end_time - start_time;
+		if (bw != 0)
+			wait_for = (sec * RB_SECTOR_SIZE * sectors) / bw;
+		if ((timedelta < latency) || (timedelta < wait_for)) {
+			if (latency > wait_for) {
+				udelay(latency - timedelta);
+			}
+			else {
+				do_gettimeofday(&tv);
+				end_time = tv.tv_sec * sec + tv.tv_usec;
+				udelay(wait_for - timedelta);
+			}
+		}
+
 	}
-	if (sector_offset != sector_cnt)
-	{
-		printk(KERN_ERR "rb: bio info doesn't match with the request info");
+	if (sector_offset != sector_cnt) {
+		printk(KERN_ERR
+		"rb: bio info doesn't match with the request info");
 		ret = -EIO;
 	}
-
 	return ret;
 }
 	
@@ -188,7 +182,6 @@ static struct block_device_operations rb_fops =
 static int __init rb_init(void)
 {
 	int ret;
-
 	/* Set up our RAM Device */
 	if ((ret = ramdevice_init()) < 0)
 	{

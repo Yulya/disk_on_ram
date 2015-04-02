@@ -1,7 +1,7 @@
 # If called directly from the command line, invoke the kernel build system.
 ifeq ($(KERNELRELEASE),)
 
-	KERNEL_SOURCE := /usr/src/linux-headers-3.16.0-30-generic/
+	KERNEL_SOURCE := /usr/src/linux-headers-`uname -r`/
 	PWD := $(shell pwd)
 default: module
 
